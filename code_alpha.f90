@@ -9,7 +9,7 @@ module variables
     implicit none
     save
 
-    integer                                  :: final_time,iter,interval,vis_flag,finish,periodic_x,periodic_y,periodic_z,duc_count
+    integer                                  :: final_time,iter,interval,vis_flag,finish,periodic_x,periodic_y,periodic_z,duc_count,terminate
     integer                                  :: firstx,lastx,firsty,lasty,firstz,lastz,startx,starty,startz,endx,endy,endz
     integer                                  :: startx_vis,starty_vis,startz_vis,endx_vis,endy_vis,endz_vis,startx_print,starty_print,startz_print,endx_print,endy_print,endz_print
     integer                                  :: myrank,mperr
@@ -17,7 +17,7 @@ module variables
     !each processor must have at least 6 points in the directions in which tthe boundary conditions are not periodic(this might be obvious or redundant but still) 
     !Not sure what is the thinking behind above comment. I see it now, 3 points per reocessor are needed irrespective of BCs
     integer,parameter                        :: sz=sizez/zprocs+6,sy=sizey/yprocs+6,sx=sizex+6,nprocs=zprocs*yprocs
-    integer,parameter                        :: n_sp=1,n_di=1,chem_flag=0,vib_flag=0 !number of species,diatomic species and the two flags
+    integer,parameter                        :: n_sp=1,n_di=1,chem_flag=0,vib_flag=1 !number of species,diatomic species and the two flags
     !n_di is only used in the case of vibrational terms. It can be incorporated in Cp and Cv but they are specified explicitly
     !keep n_sp=1 and n_di=1 when ideal gas case is used, or any other model which doesn't involve dealing with seperate species
     !make sure n_di<=n_sp
@@ -28,9 +28,9 @@ module variables
     double precision,dimension(sx,sy,sz)     :: x,y,z,y_ph,dy_dy_ph,T,Tv,ro,p,u,v,w,ducros,vis,cond,cond_v,vortcty,heatx,heaty,heatz!,m_check
     double precision,dimension(n_di)         :: theta_v
     double precision,dimension(n_sp)         :: Mw,Cp,Cv,Cv_tr,h0,At,Bt,Ct
-    ! double precision,dimension(2)            :: cf,eta,theta,cm,a1,a2,a3,a4,a5
+    double precision,dimension(1)            :: cf,eta,theta,cm,a1,a2,a3,a4,a5
     double precision                         :: gamma_ref,gamma_star,R_u,R_star,R_ref,Re,Mach,prandtl,dx,dy,dz,dxin,dyin,dzin,dt,cfl,cptim,walltim1,walltim2,lenc,lenx,leny,lenz,lenz_in,lo_star,co_star,co_ref,ro_ref,ro_star,vis_ref,vis_star,T_ref,T_star,Lewis
-    double precision                         :: vel_star,p_star,T_wall,Tv_star,E_star,Ev_star,del_h0,intial_turb_KE,t_turb,k_eq_star_eq
+    double precision                         :: vel_star,p_star,T_wall,Tv_star,del_h0,intial_turb_KE,t_turb,k_eq_star_eq,cond_v_inf
     
 end module variables
 
@@ -101,10 +101,11 @@ subroutine compute()
     double precision                           :: d6dx_vect,d6dy_vect,d6dz_vect,d6dx,d6dy,d6dz
     double precision, dimension(sx,sy,sz,n_sp) :: ws
     double precision, dimension(sx,sy,sz)      :: wv
-    double precision, dimension(sx,sy,sz,neq)  :: convergence=0d0
+    ! double precision, dimension(sx,sy,sz,neq)  :: convergence=0d0
 
     iter=0
     l=0
+    terminate = 0
   
     q0(:,:,:,:) = q(:,:,:,:)
     ws(:,:,:,:) = 0d0
@@ -150,6 +151,7 @@ subroutine compute()
             call bc(l)
             call message_pass(l)
             call update(l)
+            if (terminate/=0) exit time
             if (chem_flag==1) call source(ws)
             if (vib_flag==1) call vib_source(ws,wv)
             call bc_viscous()
@@ -171,13 +173,14 @@ subroutine compute()
         q0(:,:,:,:) = q(:,:,:,:)
      
         call stats()
-        if (mod(iter,interval)==0) call output(iter,ws)
+        ! if (mod(iter,interval)==0) call output(iter,ws)
+        ! if (iter>100) call output(iter,ws)
         
         ! if(test_time>final_time) stop   !if stop or even pause is used following if condition, one of the processors always interrupts output command of others 
         ! if(flag_global==4) test_time = final_time + 1
 
     end do time
-
+    
 end subroutine compute
 
 !******************************************************************************************************************************************************************************************************
@@ -206,7 +209,7 @@ subroutine data_in()
     integer                           :: i,j,k,m,numrc1,numrc2,numrc3,numrc4,statu,ierr,restart
     double precision                  :: p1,dum,ignore,ignore1,add,R_s,Z_s,Cp_star,cs1_star_eq,cs2_star_eq
     double precision, dimension(n_sp) :: cs_star,ro_s_star
-    double precision, dimension(n_di) :: ev_s_star
+    double precision, dimension(n_di) :: ev_s_star,ev_s
 
     
     !********** reference quantities **********
@@ -232,7 +235,7 @@ subroutine data_in()
 
 
     !********** initial quantities **********
-    T_star = 5000d0
+    T_star = 7000d0
     ro_star = ro_ref
     cs_star(1) = 1d0
     ! cs_star(2) = 0d0
@@ -257,21 +260,24 @@ subroutine data_in()
     lo_star = Re*vis_star/ro_star/co_star
     vel_star = Mach*co_star
     Tv_star = T_star
+    Tv(:,:,:) = Tv_star
     T_wall = T_star
+    cond_v_inf = vis_star*(R_u/Mw(1))*(theta_v(1)/Tv_star)**2*(exp(theta_v(1)/Tv_star)/(exp(theta_v(1)/Tv_star-1)**2))
+    write(*,*)cond_v_inf,vis_star*(Cv(1) + 3d0*Cv_tr(1)/2d0)
     
     ! Z_s = 10000d0/T_star
     ! k_eq_star_eq = cm(1)*exp(a1(1)/Z_s + a2(1) + a3(1)*log(Z_s) + a4(1)*Z_s + a5(1)*Z_s**2)
     ! cs1_star_eq = 1d0/(1d0 + k_eq_star_eq)
     ! cs2_star_eq = k_eq_star_eq/(1d0 + k_eq_star_eq)
 
-    ! ev_s_star(:) = vib_flag*((R_u/Mw(1:n_di))*theta_v(:)/(exp(theta_v(:)/Tv_star)-1))
+    ev_s_star(:) = vib_flag*((R_u/Mw(1:n_di))*theta_v(:)/(exp(theta_v(:)/Tv_star)-1))
     !*****************************************************************************************************
     
 
 
     
     !********** time quantities **********
-    dt = 0.010d0*lo_star/co_star
+    dt = 0.040d0*lo_star/co_star
     final_time = 2000
     interval = 500
     !*************************************
@@ -372,6 +378,7 @@ subroutine data_in()
     numrc4 = mod(numrc2,10)
 
     filename='p_rescaled'//char(numrc3+48)//char(numrc4+48)//'.dat'
+    ! filename='Turb_inflow'//char(numrc3+48)//char(numrc4+48)//'.dat'
     open(unit=40,file=filename,STATUS='OLD',ACTION='READ',IOSTAT=ierr)
     read(40,*)
     read(40,*)
@@ -379,6 +386,7 @@ subroutine data_in()
         do j=starty,endy
             do i=startx,endx
                 read(40,'(6E30.18)')u(i,j,k),v(i,j,k),w(i,j,k),p(i,j,k),ro(i,j,k),T(i,j,k)
+                ! read(40,'(1x,6E30.18)')ignore,ignore,ignore,u(i,j,k),v(i,j,k),w(i,j,k)
             end do
         end do
     end do
@@ -390,21 +398,22 @@ subroutine data_in()
                 ro(i,j,k) = ro_star*(1d0+ro(i,j,k))
                 p(i,j,k) = p_star*(1d0+p(i,j,k))
                 T(i,j,k) = T_star*(1d0+T(i,j,k))
+                Tv(i,j,k) = T(i,j,k)
                 u(i,j,k) = u(i,j,k)*co_star
                 v(i,j,k) = v(i,j,k)*co_star
                 w(i,j,k) = w(i,j,k)*co_star
+                ev_s(:) = vib_flag*((R_u/Mw(1:n_di))*theta_v(:)/(exp(theta_v(:)/Tv(i,j,k))-1))
                 if(n_sp/=1) q(i,j,k,1:n_sp)  = cs_star(1:n_sp)*ro(i,j,k)
                 if(n_sp==1) q(i,j,k,n_sp)  = ro(i,j,k)
                 q(i,j,k,n_sp+1)  = ro(i,j,k)*u(i,j,k)
                 q(i,j,k,n_sp+2)  = ro(i,j,k)*v(i,j,k)
                 q(i,j,k,n_sp+3)  = ro(i,j,k)*w(i,j,k)
                 q(i,j,k,n_sp+4)  = add(q(i,j,k,1:n_sp),Cv,n_sp,1)*T(i,j,k) + 0.50d0*ro(i,j,k)*(u(i,j,k)**2 + v(i,j,k)**2 + w(i,j,k)**2) + &
-                                   add(q(i,j,k,1:n_di),ev_s_star,n_di,1)*vib_flag + add(q(i,j,k,1:n_sp),h0,n_sp,1)*chem_flag
-                if (vib_flag==1) q(i,j,k,n_sp+5) = add(q(i,j,k,1:n_di),ev_s_star,n_di,1)
+                                   add(q(i,j,k,1:n_di),ev_s,n_di,1)*vib_flag + add(q(i,j,k,1:n_sp),h0,n_sp,1)*chem_flag
+                if (vib_flag==1) q(i,j,k,n_sp+5) = add(q(i,j,k,1:n_di),ev_s,n_di,1)
             end do
         end do
     end do
-    Tv(:,:,:) = Tv_star
     !****************************************** initialisation of flow variables *****************************************
    
 end subroutine data_in
@@ -438,7 +447,7 @@ subroutine output(nth,ws)
     character(len=8)   :: date
     character(len=10)  :: time
     double precision   :: check,vortctyz,vortctyy,vortctyx
-    double precision   :: drvtx,drvty,drvtz,total_vel,local_a,local_mach
+    double precision   :: drvtx,drvty,drvtz,total_vel,local_a,local_mach,d6dx,d6dy,d6dz
 
     digit1 = nth/1000000
     digit2 = mod(nth,1000000)
@@ -458,19 +467,19 @@ subroutine output(nth,ws)
     numrc3 = numrc2/10
     numrc4 = mod(numrc2,10)
 
-    ! filename='neq'//char(nprocs+48)//'_'//char(digit1+48)//char(digit3+48)//char(digit5+48)//char(digit7+48)//char(digit9+48)//char(digit11+48)//char(digit12+48)//'p'//char(numrc1+48)//char(numrc3+48)//char(numrc4+48)//'.dat'
-    ! open(unit=40,file=filename,STATUS='REPLACE',ACTION='WRITE',IOSTAT=ierr)
-    ! if(ierr/=0) write(*,*)filename,ierr
-    ! write(40,'(a180)') 'variables="z","y","x","ro1","ro2","ro","p","T","Tv","u","v","w","ws","ducros","cs1","cs2"'
-    ! write(40,*) 'zone I=',endz_print-startz_print+1, 'J=',endy_print-starty_print+1, 'K=',endx_print-startx_print+1,' F=POINT'
-    ! do i=startx_print,endx_print
-    !     do j=starty_print,endy_print
-    !         do k=startz_print,endz_print
-    !             write(40,'(14E20.10)') z(i,j,k)/lo_star,y_ph(i,j,k)/lo_star,x(i,j,k)/lo_star,q(i,j,k,1)/ro_star,q(i,j,k,2)/ro_star,ro(i,j,k)/ro_star,p(i,j,k)/p_star,T(i,j,k)/T_star,Tv(i,j,k)/Tv_star,u(i,j,k)/co_star,v(i,j,k)/co_star,w(i,j,k)/co_star,ws(i,j,k,1),ducros(i,j,k),q(i,j,k,1)/ro(i,j,k),q(i,j,k,2)/ro(i,j,k)
-    !         end do
-    !     end do
-    ! end do
-    ! close(40)
+    filename='neq'//char(nprocs+48)//'_'//char(digit1+48)//char(digit3+48)//char(digit5+48)//char(digit7+48)//char(digit9+48)//char(digit11+48)//char(digit12+48)//'p'//char(numrc1+48)//char(numrc3+48)//char(numrc4+48)//'.dat'
+    open(unit=40,file=filename,STATUS='REPLACE',ACTION='WRITE',IOSTAT=ierr)
+    if(ierr/=0) write(*,*)filename,ierr
+    write(40,'(a180)') 'variables="z","y","x","ro1","ro2","ro","p","T","Tv","u","v","w","ws","ducros","cs1","cs2"'
+    write(40,*) 'zone I=',endz_print-startz_print+1, 'J=',endy_print-starty_print+1, 'K=',endx_print-startx_print+1,' F=POINT'
+    do i=startx_print,endx_print
+        do j=starty_print,endy_print
+            do k=startz_print,endz_print
+                write(40,'(14E20.10)') z(i,j,k)/lo_star,y_ph(i,j,k)/lo_star,x(i,j,k)/lo_star,d6dx(T,i,j,k),d6dy(T,i,j,k),d6dz(T,i,j,k),d6dx(Tv,i,j,k),d6dy(Tv,i,j,k),d6dz(Tv,i,j,k),u(i,j,k)/co_star,v(i,j,k)/co_star,w(i,j,k)/co_star,ws(i,j,k,1),ducros(i,j,k),q(i,j,k,1)/ro(i,j,k),q(i,j,k,2)/ro(i,j,k)
+            end do
+        end do
+    end do
+    close(40)
 
     ! filename='Time.dat'
     ! open(unit=30,file=filename,STATUS='UNKNOWN',ACTION='WRITE',IOSTAT=ierr)
@@ -518,10 +527,10 @@ subroutine stats()
     character(len=40)                     :: filename
     integer                               :: i,j,k,ierr
     double precision                      :: global_average,d6dx,d6dy,d6dz
-    double precision                      :: u_bar,v_bar,w_bar,ro_bar,ro1_bar,ro2_bar,p_bar,T_bar,vis_bar,cs1_bar,cs2_bar,vort_bar,vort_mag_bar,vortx_bar,vorty_bar,vortz_bar,div_bar
-    double precision                      :: u_p_sq_bar,v_p_sq_bar,w_p_sq_bar,ro_p_sq_bar,p_p_sq_bar,T_p_sq_bar,vortx_p_sq_bar,vorty_p_sq_bar,vortz_p_sq_bar,vort_p_sq_bar,div_p_sq_bar
+    double precision                      :: u_bar,v_bar,w_bar,ro_bar,ro1_bar,ro2_bar,p_bar,T_bar,Tv_bar,vis_bar,cs1_bar,cs2_bar,vort_bar,vort_mag_bar,vortx_bar,vorty_bar,vortz_bar,div_bar
+    double precision                      :: u_p_sq_bar,v_p_sq_bar,w_p_sq_bar,ro_p_sq_bar,p_p_sq_bar,T_p_sq_bar,Tv_p_sq_bar,vortx_p_sq_bar,vorty_p_sq_bar,vortz_p_sq_bar,vort_p_sq_bar,div_p_sq_bar
     double precision                      :: lambda,lambda_x,lambda_y,lambda_z,skew,skew_x,skew_y,skew_z,turb_KE,Re_lambda,M_t,t_scale
-    double precision, dimension(sx,sy,sz) :: u_p,v_p,w_p,ro_p,p_p,T_p,dudx,dvdy,dwdz,cs1,cs2
+    double precision, dimension(sx,sy,sz) :: u_p,v_p,w_p,ro_p,p_p,T_p,Tv_p,dudx,dvdy,dwdz,cs1,cs2
     double precision, dimension(sx,sy,sz) :: vortx,vorty,vortz,vort,vortx_p,vorty_p,vortz_p,div,div_p
 
     t_scale = (lo_star/co_star)
@@ -532,6 +541,7 @@ subroutine stats()
     ro_bar = global_average(ro,1)
     p_bar = global_average(p,1)
     T_bar = global_average(T,1)
+    Tv_bar = global_average(Tv,1)
     vis_bar = global_average(vis,1)
 
     u_p(:,:,:) = u(:,:,:) - u_bar
@@ -540,6 +550,7 @@ subroutine stats()
     ro_p(:,:,:) = ro(:,:,:) - ro_bar
     p_p(:,:,:) = p(:,:,:) - p_bar
     T_p(:,:,:) = T(:,:,:) - T_bar
+    Tv_p(:,:,:) = Tv(:,:,:) - Tv_bar
                 
     do k=startz,endz
         do j=starty,endy
@@ -574,6 +585,7 @@ subroutine stats()
     ro_p_sq_bar = global_average(ro_p,2)
     p_p_sq_bar = global_average(p_p,2)
     T_p_sq_bar = global_average(T_p,2)
+    Tv_p_sq_bar = global_average(Tv_p,2)
     vortx_p_sq_bar = global_average(vortx_p,2)
     vorty_p_sq_bar = global_average(vorty_p,2)
     vortz_p_sq_bar = global_average(vortz_p,2)
@@ -606,7 +618,7 @@ subroutine stats()
     if(myrank==0 .and. iter==0) then
         open(unit=40,file='stats.dat',STATUS='REPLACE',ACTION='WRITE',IOSTAT=ierr)
         open(unit=50,file='stats_annex.dat',STATUS='REPLACE',ACTION='WRITE',IOSTAT=ierr)
-        write(40,'(a118)')'variables = "time","lam","s","Relam","ke","Mt","ro_rms","p_rms","T_rms","ro_bar","p_bar","T_bar","vort_psb","div_psb"'
+        write(40,'(a136)')'variables = "time","lam","s","Relam","ke","Mt","ro_rms","p_rms","T_rms","Tv_rms","ro_bar","p_bar","T_bar","Tv_bar","vort_psb","div_psb"'
         write(50,'(a175,a51)')'variables = "time","lam1","lam2","lam3","s1","s2","s3","u_rms","v_rms","w_rms","u_bar","v_bar","w_bar","vort_mag_bar","vortx_bar","vorty_bar","vortz_bar","vort_bar","div_bar"', &
                           '"vortx_p_sq_bar","vorty_p_sq_bar","vortz_p_sq_bar"'
         close(40)
@@ -616,8 +628,8 @@ subroutine stats()
     if(myrank==0) then
         open(unit=40,file='stats.dat',STATUS='UNKNOWN',ACTION='WRITE',POSITION='APPEND',IOSTAT=ierr)
         open(unit=50,file='stats_annex.dat',STATUS='UNKNOWN',ACTION='WRITE',POSITION='APPEND',IOSTAT=ierr)
-        write(40,'(14E30.18)')iter*dt/t_scale, lambda/lo_star, skew, Re_lambda, turb_KE/intial_turb_KE, M_t, sqrt(ro_p_sq_bar)/ro_star, sqrt(p_p_sq_bar)/p_star, sqrt(T_p_sq_bar)/T_star, ro_bar/ro_star,  &
-                              p_bar/p_star, T_bar/T_star, vort_p_sq_bar*t_scale**2, div_p_sq_bar*t_scale**2
+        write(40,'(16E30.18)')iter*dt/t_scale, lambda/lo_star, skew, Re_lambda, turb_KE/intial_turb_KE, M_t, sqrt(ro_p_sq_bar)/ro_star, sqrt(p_p_sq_bar)/p_star, sqrt(T_p_sq_bar)/T_star,                  &
+                              sqrt(Tv_p_sq_bar)/Tv_star, ro_bar/ro_star, p_bar/p_star, T_bar/T_star, Tv_bar/Tv_star, vort_p_sq_bar*t_scale**2, div_p_sq_bar*t_scale**2
         write(50,'(22E30.18)')iter*dt/t_scale, lambda_x/lo_star, lambda_y/lo_star, lambda_z/lo_star, skew_x, skew_y, skew_z, sqrt(u_p_sq_bar)/co_star, sqrt(v_p_sq_bar)/co_star, sqrt(w_p_sq_bar)/co_star, &
                               u_bar/co_star, v_bar/co_star, w_bar/co_star, vort_mag_bar*t_scale, vortx_bar*t_scale, vorty_bar*t_scale, vortz_bar*t_scale, vort_bar*t_scale, div_bar*t_scale,               &
                               vortx_p_sq_bar*t_scale**2, vorty_p_sq_bar*t_scale**2, vortz_p_sq_bar*t_scale**2
@@ -764,7 +776,7 @@ end subroutine bc
 !x,y,z are the computational computational cordinates, x_ph,y_ph,z_ph is the physical coordinates
 !d()_d() are the ttransformation metrics
 
-subroutine gridin()   
+subroutine gridin()
 
     use variables
     implicit none
@@ -809,7 +821,7 @@ subroutine update(rkl)
     implicit none
     include 'mpif.h'
     integer,intent(in)                                :: rkl
-    integer                                           :: i,j,k,m,n,l
+    integer                                           :: i,j,k,m,n,l,terminate_global
     double precision                                  :: energy,i_engy,div_duc,omg_duc
     double precision                                  :: towxx,towyy,towzz,towxy,towxz,towyz,towyx,towzx,towzy
     double precision, allocatable, dimension(:,:,:,:) :: flux_iph,flux_jph,flux_kph
@@ -818,7 +830,7 @@ subroutine update(rkl)
     double precision, dimension(neq)                  :: eigen
     double precision, dimension(n_sp)                 :: mu,kap,X_t,phi_t,dum1,dum2,f_diff,g_diff,h_diff,hs,ev_s,one
     double precision, dimension(n_di)                 :: kap_v,dum_v
-    double precision                                  :: d6dx,d6dy,d6dz,d6dx_vect,d6dy_vect,d6dz_vect,e1,e2,vel_square,add,vib_temp
+    double precision                                  :: d6dx,d6dy,d6dz,d6dx_vect,d6dy_vect,d6dz_vect,e1,e2,vel_square,add,vib_temp,global_average
     double precision                                  :: D,R_s,Mw_mix !molecular weight of the mixture    
 
     one(:) = 1d0
@@ -831,10 +843,11 @@ subroutine update(rkl)
                 u(i,j,k) = q(i,j,k,n_sp+1)/ro(i,j,k)
                 v(i,j,k) = q(i,j,k,n_sp+2)/ro(i,j,k)
                 w(i,j,k) = q(i,j,k,n_sp+3)/ro(i,j,k)
-                if (ISNAN(u(i,j,k)) == .TRUE.) then
+                if (ISNAN(u(i,j,k)) == .TRUE. .or. q(i,j,k,n_sp+5) < 0d0) then
                     ! if(myrank==0) write(*,*) iter,rkl,i,j,k!,ro(i,j,k),p(i,j,k),T(i,j,k),u(i,j,k),v(i,j,k),w(i,j,k)
-                    write(*,*) iter,rkl,i,j,k!,ro(i,j,k),p(i,j,k),T(i,j,k),u(i,j,k),v(i,j,k),w(i,j,k)
-                    STOP
+                    write(*,'(6i5,3x,7E12.4)') myrank,iter,rkl,i,j,k,ro(i,j,k),p(i,j,k),T(i,j,k),Tv(i,j,k),u(i,j,k),v(i,j,k),w(i,j,k)
+                    ! STOP
+                    terminate = 1
                 end if
                 vel_square = u(i,j,k)*u(i,j,k) + v(i,j,k)*v(i,j,k) + w(i,j,k)*w(i,j,k)
                 if (vib_flag==1) T(i,j,k) = (q(i,j,k,n_sp+4) - q(i,j,k,n_sp+5) - 0.50d0*ro(i,j,k)*vel_square - chem_flag*add(q(i,j,k,1:n_sp),h0,n_sp,1))/add(q(i,j,k,1:n_sp),Cv,n_sp,1)
@@ -849,11 +862,15 @@ subroutine update(rkl)
 
                 vis(i,j,k) = 0.1d0*exp((At(1)*log(T(i,j,k)) + Bt(1))*log(T(i,j,k)) + Ct(1))
                 cond(i,j,k) = vis(i,j,k)*(Cv(1) + 3d0*Cv_tr(1)/2d0)
-                ! cond_v(i,j,k) = vib_flag*(vis(i,j,k)*(R_u/Mw(1))*(theta_v(1)/Tv(i,j,k))**2*(exp(theta_v(1)/Tv(i,j,k))/(exp(theta_v(1)/Tv(i,j,k))-1)**2))
+                cond_v(i,j,k) = (vis(i,j,k)*(R_u/Mw(1))*(theta_v(1)/Tv(i,j,k))**2*(exp(theta_v(1)/Tv(i,j,k))/(exp(theta_v(1)/Tv(i,j,k))-1)**2)) !cond_v_inf!
             end do
         end do
     end do
 
+    CALL MPI_ALLREDUCE(terminate,terminate_global,1,MPI_INTEGER,MPI_SUM,MPI_COMM_WORLD,mperr)
+    terminate = terminate_global
+
+    ! if (rkl==4) write(*,'(6E12.4)')global_average(cond,1),global_average(cond_v,1),maxval(cond),maxval(cond_v),minval(cond),minval(cond_v)
     
 
     ! duc_count = 0
@@ -948,22 +965,22 @@ subroutine update(rkl)
                 visf(i,j,k,n_sp+1)  = towxx
                 visf(i,j,k,n_sp+2)  = towxy
                 visf(i,j,k,n_sp+3)  = towzx
-                visf(i,j,k,n_sp+4)  = u(i,j,k)*towxx + v(i,j,k)*towxy + w(i,j,k)*towzx - heatx(i,j,k) - add(f_diff,hs,n_sp,1)
-                if (vib_flag==1) visf(i,j,k,n_sp+5) = -(-cond_v(i,j,k)*d6dx(Tv,i,j,k)) - add(f_diff,ev_s,n_di,1)
+                visf(i,j,k,n_sp+4)  = u(i,j,k)*towxx + v(i,j,k)*towxy + w(i,j,k)*towzx - heatx(i,j,k)! - add(f_diff,hs,n_sp,1)
+                if (vib_flag==1) visf(i,j,k,n_sp+5) = -(-cond_v(i,j,k)*d6dx(Tv,i,j,k))! - add(f_diff,ev_s,n_di,1)
                 
                 visg(i,j,k,1:n_sp)  = -g_diff(1:n_sp)
                 visg(i,j,k,n_sp+1)  = towxy
                 visg(i,j,k,n_sp+2)  = towyy
                 visg(i,j,k,n_sp+3)  = towyz
-                visg(i,j,k,n_sp+4)  = u(i,j,k)*towxy + v(i,j,k)*towyy + w(i,j,k)*towyz - heaty(i,j,k) - add(g_diff,hs,n_sp,1)
-                if (vib_flag==1) visg(i,j,k,n_sp+5) = -(-cond_v(i,j,k)*d6dx(Tv,i,j,k)) - add(g_diff,ev_s,n_di,1)
+                visg(i,j,k,n_sp+4)  = u(i,j,k)*towxy + v(i,j,k)*towyy + w(i,j,k)*towyz - heaty(i,j,k)! - add(g_diff,hs,n_sp,1)
+                if (vib_flag==1) visg(i,j,k,n_sp+5) = -(-cond_v(i,j,k)*d6dx(Tv,i,j,k))! - add(g_diff,ev_s,n_di,1)
                 
                 vish(i,j,k,1:n_sp)  = -h_diff(1:n_sp) 
                 vish(i,j,k,n_sp+1)  = towzx
                 vish(i,j,k,n_sp+2)  = towyz
                 vish(i,j,k,n_sp+3)  = towzz
-                vish(i,j,k,n_sp+4)  = u(i,j,k)*towzx + v(i,j,k)*towyz + w(i,j,k)*towzz - heatz(i,j,k) - add(h_diff,hs,n_sp,1)
-                if (vib_flag==1) vish(i,j,k,n_sp+5) = -(-cond_v(i,j,k)*d6dx(Tv,i,j,k)) - add(h_diff,ev_s,n_di,1)
+                vish(i,j,k,n_sp+4)  = u(i,j,k)*towzx + v(i,j,k)*towyz + w(i,j,k)*towzz - heatz(i,j,k)! - add(h_diff,hs,n_sp,1)
+                if (vib_flag==1) vish(i,j,k,n_sp+5) = -(-cond_v(i,j,k)*d6dx(Tv,i,j,k))! - add(h_diff,ev_s,n_di,1)
             end do
         end do
     end do
@@ -1786,42 +1803,41 @@ subroutine vib_source(ws,wv)
     double precision, dimension(sx,sy,sz,n_sp), intent(in) :: ws
     double precision, dimension(sx,sy,sz), intent(out)     :: wv
     double precision, dimension(n_sp)                      :: ro_s,X_t,tow_sr,A_sr,mu_sr,one
-    double precision, dimension(n_di)                      :: ev_s,ev_s_star,tow_s,Q_tv
+    double precision, dimension(n_di)                      :: ev_s,ev_s_star1,tow_s,Q_tv !star quantities are used as reference in data_in so star1 here to avoid confusion
     double precision                                       :: sum,Mw_mix,add
     integer                                                :: i,j,k,r,s
 
-    write(*,*)'vib_source() is called'
-    wv = 0d0
+    one(:) = 1d0
 
-    ! one(:) = 1d0
-
-    ! do k=startz,endz
-    !     do j=starty,endy
-    !         do i=startx,endx
-    !             ro_s(:) = q(i,j,k,1:n_sp)
+    do k=startz,endz
+        do j=starty,endy
+            do i=startx,endx
+                ro_s(:) = q(i,j,k,1:n_sp)
                 
-    !             Mw_mix = add(ro_s,Mw,n_sp,-1)/ro(i,j,k)
+                Mw_mix = Mw(1) !add(ro_s,Mw,n_sp,-1)/ro(i,j,k)
 
-    !             do s=1,3
-    !                 ev_s(s)       = (R_u/Mw(s))*(theta_v(s)/(exp(theta_v(s)/Tv(i,j,k))-1))
-    !                 ev_s_star(s)  = (R_u/Mw(s))*(theta_v(s)/(exp(theta_v(s)/T(i,j,k))-1))
+                ! do s=1,3
+                s=1
+                    ev_s(s)       = (R_u/Mw(s))*(theta_v(s)/(exp(theta_v(s)/Tv(i,j,k))-1))
+                    ev_s_star1(s)  = (R_u/Mw(s))*(theta_v(s)/(exp(theta_v(s)/T(i,j,k))-1))
                 
-    !                 do r=1,5
-    !                     X_t(r) = ro_s(r)*Mw_mix/(Mw(r)*ro(i,j,k))
-    !                     mu_sr(r) = Mw(s)*Mw(r)/(Mw(s) + Mw(r))
-    !                     A_sr(r) = 1.16e-3*sqrt(mu_sr(r))*theta_v(s)**(4d0/3)
-    !                     tow_sr(r) = exp(A_sr(r)*(T(i,j,k)**(-1d0/3) - 0.015*mu_sr(r)**(1d0/4)) - 18.42)/(p(i,j,k)/101325d0)
-    !                 end do
+                    ! do r=1,5
+                    r=1
+                        ! X_t(r) = ro_s(r)*Mw_mix/(Mw(r)*ro(i,j,k))
+                        mu_sr(r) = Mw(s)*Mw(r)/(Mw(s) + Mw(r))
+                        A_sr(r) = 1.16e-3*sqrt(mu_sr(r))*theta_v(s)**(4d0/3)
+                        tow_sr(r) = exp(A_sr(r)*(T(i,j,k)**(-1d0/3) - 0.015*mu_sr(r)**(1d0/4)) - 18.42)/(p(i,j,k)/101325d0)
+                    ! end do
 
-    !                 tow_s(s) = add(X_t,one,n_sp,1)/add(X_t,tow_sr,n_sp,-1)
+                    tow_s(s) = tow_sr(r)!add(X_t,one,n_sp,1)/add(X_t,tow_sr,n_sp,-1)
                 
-    !                 Q_tv(s) = ro_s(s)*(ev_s_star(s) - ev_s(s))/tow_s(s)
-    !             end do
+                    Q_tv(s) = ro_s(s)*(ev_s_star1(s) - ev_s(s))/tow_s(s)
+                ! end do
 
-    !             wv(i,j,k) = Q_tv(1) + Q_tv(2) + Q_tv(3) + ws(i,j,k,1)*ev_s(1) + ws(i,j,k,2)*ev_s(2) + ws(i,j,k,3)*ev_s(3)
-    !         end do
-    !     end do
-    ! end do
+                wv(i,j,k) = Q_tv(1) + ws(i,j,k,1)*ev_s(1) !Q_tv(1) + Q_tv(2) + Q_tv(3) + ws(i,j,k,1)*ev_s(1) + ws(i,j,k,2)*ev_s(2) + ws(i,j,k,3)*ev_s(3)
+            end do
+        end do
+    end do
 
 end subroutine vib_source
 
@@ -2102,21 +2118,39 @@ double precision function vib_temp(i,j,k)
     implicit none
     integer, intent(in)     :: i,j,k
     integer                 :: m
-    double precision        :: func,func_der,eps,Ev,x_i
+    double precision        :: func,func_der,eps,Ev,x_i,x_ip1
     double precision, dimension(n_sp) :: ro_s
 
-    write(*,*)'vib_temp() is called'
+    ro_s(:) = q(i,j,k,1:n_sp)
 
-    ! ro_s(:) = q(i,j,k,1:n_sp)
-
-    ! x_i = Tv(i,j,k)
-    ! Ev = q(i,j,k,n_sp+5)
-    ! ! do while (abs(eps) > 1e-6)
-    ! do m=1,4 !This is what shankar did in his code
-    !     func = ro_s(1)*(R_u/Mw(1))*(theta_v(1)/(exp(theta_v(1)/x_i)-1)) + ro_s(2)*(R_u/Mw(2))*(theta_v(2)/(exp(theta_v(2)/x_i)-1)) + ro_s(3)*(R_u/Mw(3))*(theta_v(3)/(exp(theta_v(3)/x_i)-1)) - Ev
-    !     func_der = ro_s(1)*(R_u/Mw(1))*(theta_v(1)/x_i)**2*(exp(theta_v(1)/x_i)/(exp(theta_v(1)/x_i)-1)**2) + ro_s(2)*(R_u/Mw(2))*(theta_v(2)/x_i)**2*(exp(theta_v(2)/x_i)/(exp(theta_v(2)/x_i)-1)**2) + ro_s(3)*(R_u/Mw(3))*(theta_v(3)/x_i)**2*(exp(theta_v(3)/x_i)/(exp(theta_v(3)/x_i)-1)**2)
-    !     x_i = x_i - func/func_der
-    ! end do                
+    x_i = Tv(i,j,k)
+    Ev = q(i,j,k,n_sp+5)
+    ! m=0
+    eps = 10d0
+    func = 100d0
+    do while (abs(func) > 1e-6)
+        m = m + 1
+    ! do m=1,100 !This is what shankar did in his code
+        ! func = ro_s(1)*(R_u/Mw(1))*(theta_v(1)/(exp(theta_v(1)/x_i)-1)) + ro_s(2)*(R_u/Mw(2))*(theta_v(2)/(exp(theta_v(2)/x_i)-1)) + ro_s(3)*(R_u/Mw(3))*(theta_v(3)/(exp(theta_v(3)/x_i)-1)) - Ev
+        ! func_der = ro_s(1)*(R_u/Mw(1))*(theta_v(1)/x_i)**2*(exp(theta_v(1)/x_i)/(exp(theta_v(1)/x_i)-1)**2) + ro_s(2)*(R_u/Mw(2))*(theta_v(2)/x_i)**2*(exp(theta_v(2)/x_i)/(exp(theta_v(2)/x_i)-1)**2) + ro_s(3)*(R_u/Mw(3))*(theta_v(3)/x_i)**2*(exp(theta_v(3)/x_i)/(exp(theta_v(3)/x_i)-1)**2)
+        func = ro_s(1)*(R_u/Mw(1))*(theta_v(1)/(exp(theta_v(1)/x_i)-1)) - Ev
+        func_der = ro_s(1)*(R_u/Mw(1))*(theta_v(1)/x_i)**2*(exp(theta_v(1)/x_i)/(exp(theta_v(1)/x_i)-1)**2)
+        x_ip1 = x_i - func/func_der
+        eps = (x_ip1 - x_i)/x_i
+        ! if(abs((x_ip1-x_i)/x_i) > 1e-3) write(*,*)iter,i,j,k,'diff'
+        ! if(m>1e6) then
+        !     if(mod(m,1000000)==0) then
+        !         write(*,*)'convergence problem in "vib_temp"'
+        !         write(*,*)iter,m,func,x_ip1,x_i,eps
+        !         ! stop
+        !     end if
+        ! end if
+        x_i = x_ip1
+        if(m>1000000000) then
+            write(*,*)Ev,Tv(i,j,k),x_i,ro_s(1)
+            stop
+        end if
+    end do               
     
     vib_temp = x_i                
     
